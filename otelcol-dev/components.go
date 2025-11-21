@@ -3,19 +3,19 @@
 package main
 
 import (
-	simpleprocessor "github.com/myuser/simpleprocessor"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/connector"
 	"go.opentelemetry.io/collector/exporter"
-	debugexporter "go.opentelemetry.io/collector/exporter/debugexporter"
-	otlpexporter "go.opentelemetry.io/collector/exporter/otlpexporter"
 	"go.opentelemetry.io/collector/extension"
 	"go.opentelemetry.io/collector/otelcol"
 	"go.opentelemetry.io/collector/processor"
-	batchprocessor "go.opentelemetry.io/collector/processor/batchprocessor"
 	"go.opentelemetry.io/collector/receiver"
-	otlpreceiver "go.opentelemetry.io/collector/receiver/otlpreceiver"
 	"go.opentelemetry.io/collector/service/telemetry/otelconftelemetry"
+	debugexporter "go.opentelemetry.io/collector/exporter/debugexporter"
+	otlpexporter "go.opentelemetry.io/collector/exporter/otlpexporter"
+	batchprocessor "go.opentelemetry.io/collector/processor/batchprocessor"
+	simpleprocessor "github.com/myuser/simpleprocessor"
+	otlpreceiver "go.opentelemetry.io/collector/receiver/otlpreceiver"
 )
 
 func components() (otelcol.Factories, error) {
@@ -24,7 +24,8 @@ func components() (otelcol.Factories, error) {
 		Telemetry: otelconftelemetry.NewFactory(),
 	}
 
-	factories.Extensions, err = otelcol.MakeFactoryMap[extension.Factory]()
+	factories.Extensions, err = otelcol.MakeFactoryMap[extension.Factory](
+	)
 	if err != nil {
 		return otelcol.Factories{}, err
 	}
@@ -61,7 +62,8 @@ func components() (otelcol.Factories, error) {
 	factories.ProcessorModules[batchprocessor.NewFactory().Type()] = "go.opentelemetry.io/collector/processor/batchprocessor v0.140.0"
 	factories.ProcessorModules[simpleprocessor.NewFactory().Type()] = "github.com/myuser/simpleprocessor v0.0.1"
 
-	factories.Connectors, err = otelcol.MakeFactoryMap[connector.Factory]()
+	factories.Connectors, err = otelcol.MakeFactoryMap[connector.Factory](
+	)
 	if err != nil {
 		return otelcol.Factories{}, err
 	}

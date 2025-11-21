@@ -10,7 +10,8 @@ processors:
   simple: {}
 
 exporters:
-  debug: {}
+  debug:
+    verbosity: detailed
 
 service:
   pipelines:
