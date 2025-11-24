@@ -2,6 +2,8 @@ package simpleprocessor
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"sync"
 	"time"
 
@@ -15,17 +17,19 @@ type simpleProcessor struct {
 	logger *zap.Logger
 	next   consumer.Metrics
 
-	mu           sync.Mutex
-	aggregations map[string]int64 // Aggregates sums by work.type
-	done         chan struct{}
+	mu             sync.Mutex
+	aggregations   map[string]int64 // Aggregates sums by work.type
+	done           chan struct{}
+	checkpointFile string
 }
 
-func newProcessor(logger *zap.Logger, next consumer.Metrics) *simpleProcessor {
+func newProcessor(logger *zap.Logger, next consumer.Metrics, checkpointFile string) *simpleProcessor {
 	return &simpleProcessor{
-		logger:       logger,
-		next:         next,
-		aggregations: make(map[string]int64),
-		done:         make(chan struct{}),
+		logger:         logger,
+		next:           next,
+		aggregations:   make(map[string]int64),
+		done:           make(chan struct{}),
+		checkpointFile: checkpointFile,
 	}
 }
 
@@ -61,13 +65,53 @@ func (p *simpleProcessor) Capabilities() consumer.Capabilities {
 }
 
 func (p *simpleProcessor) Start(ctx context.Context, host component.Host) error {
+	p.loadState()
 	go p.flushLoop()
 	return nil
 }
 
 func (p *simpleProcessor) Shutdown(ctx context.Context) error {
 	close(p.done)
+	p.saveState()
 	return nil
+}
+
+func (p *simpleProcessor) loadState() {
+	if p.checkpointFile == "" {
+		return
+	}
+	data, err := os.ReadFile(p.checkpointFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			p.logger.Error("Failed to read checkpoint file", zap.Error(err))
+		}
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := json.Unmarshal(data, &p.aggregations); err != nil {
+		p.logger.Error("Failed to unmarshal checkpoint", zap.Error(err))
+	}
+}
+
+func (p *simpleProcessor) saveState() {
+	if p.checkpointFile == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.saveStateLocked()
+}
+
+func (p *simpleProcessor) saveStateLocked() {
+	data, err := json.Marshal(p.aggregations)
+	if err != nil {
+		p.logger.Error("Failed to marshal checkpoint", zap.Error(err))
+		return
+	}
+	if err := os.WriteFile(p.checkpointFile, data, 0644); err != nil {
+		p.logger.Error("Failed to write checkpoint file", zap.Error(err))
+	}
 }
 
 func (p *simpleProcessor) flushLoop() {
@@ -87,6 +131,10 @@ func (p *simpleProcessor) flushLoop() {
 
 func (p *simpleProcessor) flush() {
 	p.mu.Lock()
+	if p.checkpointFile != "" {
+		p.saveStateLocked()
+	}
+
 	if len(p.aggregations) == 0 {
 		p.mu.Unlock()
 		return
@@ -103,7 +151,7 @@ func (p *simpleProcessor) flush() {
 	m.SetUnit("1")
 	sum := m.SetEmptySum()
 	sum.SetIsMonotonic(true)
-	sum.SetAggregationTemporality(pmetric.AggregationTemporalityDelta)
+	sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 
 	for workType, count := range p.aggregations {
 		dp := sum.DataPoints().AppendEmpty()
@@ -111,8 +159,7 @@ func (p *simpleProcessor) flush() {
 		dp.SetIntValue(count)
 	}
 
-	// Reset aggregations
-	p.aggregations = make(map[string]int64)
+	// Do not reset aggregations for cumulative metrics
 	p.mu.Unlock()
 
 	// Use background context as the original request context is long gone

@@ -7,7 +7,8 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  simple: {}
+  simple:
+    checkpoint_file: "my_checkpoint.json"
 
 exporters:
   debug:
