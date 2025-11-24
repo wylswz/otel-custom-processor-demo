@@ -2,6 +2,11 @@
 
 This project demonstrates how to extend the OpenTelemetry Collector with a custom processor written in Go, and validates it using a Python client.
 
+It simulates
+- custom processor
+- persistent sending queue
+- unstable collector
+
 ## Project Structure
 
 - `myprocessor/`: Contains the source code for the custom OpenTelemetry processor (`simpleprocessor`).
