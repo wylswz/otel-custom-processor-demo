@@ -3,12 +3,14 @@ package simpleprocessor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/extension/xextension/storage"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
 )
@@ -21,15 +23,21 @@ type simpleProcessor struct {
 	aggregations   map[string]int64 // Aggregates sums by work.type
 	done           chan struct{}
 	checkpointFile string
+
+	storageID     *component.ID
+	storageClient storage.Client
+	id            component.ID
 }
 
-func newProcessor(logger *zap.Logger, next consumer.Metrics, checkpointFile string) *simpleProcessor {
+func newProcessor(logger *zap.Logger, next consumer.Metrics, checkpointFile string, storageID *component.ID, id component.ID) *simpleProcessor {
 	return &simpleProcessor{
 		logger:         logger,
 		next:           next,
 		aggregations:   make(map[string]int64),
 		done:           make(chan struct{}),
 		checkpointFile: checkpointFile,
+		storageID:      storageID,
+		id:             id,
 	}
 }
 
@@ -65,52 +73,95 @@ func (p *simpleProcessor) Capabilities() consumer.Capabilities {
 }
 
 func (p *simpleProcessor) Start(ctx context.Context, host component.Host) error {
-	p.loadState()
+	if p.storageID != nil {
+		ext, ok := host.GetExtensions()[*p.storageID]
+		if !ok {
+			return fmt.Errorf("storage extension %q not found", p.storageID)
+		}
+		storageExt, ok := ext.(storage.Extension)
+		if !ok {
+			return fmt.Errorf("extension %q is not a storage extension", p.storageID)
+		}
+		client, err := storageExt.GetClient(ctx, component.KindProcessor, p.id, "")
+		if err != nil {
+			return fmt.Errorf("failed to get storage client: %w", err)
+		}
+		p.storageClient = client
+	}
+
+	p.loadState(ctx)
 	go p.flushLoop()
 	return nil
 }
 
 func (p *simpleProcessor) Shutdown(ctx context.Context) error {
 	close(p.done)
-	p.saveState()
+	p.saveState(ctx)
+	if p.storageClient != nil {
+		return p.storageClient.Close(ctx)
+	}
 	return nil
 }
 
-func (p *simpleProcessor) loadState() {
-	if p.checkpointFile == "" {
-		return
-	}
-	data, err := os.ReadFile(p.checkpointFile)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			p.logger.Error("Failed to read checkpoint file", zap.Error(err))
-		}
-		return
-	}
+func (p *simpleProcessor) loadState(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	var data []byte
+	var err error
+
+	if p.storageClient != nil {
+		data, err = p.storageClient.Get(ctx, "aggregations")
+		if err != nil {
+			p.logger.Error("Failed to read checkpoint from storage", zap.Error(err))
+			return
+		}
+		if data == nil {
+			// Not found
+			return
+		}
+	} else if p.checkpointFile != "" {
+		data, err = os.ReadFile(p.checkpointFile)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				p.logger.Error("Failed to read checkpoint file", zap.Error(err))
+			}
+			return
+		}
+	} else {
+		return
+	}
+
 	if err := json.Unmarshal(data, &p.aggregations); err != nil {
 		p.logger.Error("Failed to unmarshal checkpoint", zap.Error(err))
 	}
 }
 
-func (p *simpleProcessor) saveState() {
-	if p.checkpointFile == "" {
-		return
-	}
+func (p *simpleProcessor) saveState(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.saveStateLocked()
+	p.saveStateLocked(ctx)
 }
 
-func (p *simpleProcessor) saveStateLocked() {
+func (p *simpleProcessor) saveStateLocked(ctx context.Context) {
+	if p.storageClient == nil && p.checkpointFile == "" {
+		return
+	}
+
 	data, err := json.Marshal(p.aggregations)
 	if err != nil {
 		p.logger.Error("Failed to marshal checkpoint", zap.Error(err))
 		return
 	}
-	if err := os.WriteFile(p.checkpointFile, data, 0644); err != nil {
-		p.logger.Error("Failed to write checkpoint file", zap.Error(err))
+
+	if p.storageClient != nil {
+		if err := p.storageClient.Set(ctx, "aggregations", data); err != nil {
+			p.logger.Error("Failed to write checkpoint to storage", zap.Error(err))
+		}
+	} else if p.checkpointFile != "" {
+		if err := os.WriteFile(p.checkpointFile, data, 0644); err != nil {
+			p.logger.Error("Failed to write checkpoint file", zap.Error(err))
+		}
 	}
 }
 
@@ -131,9 +182,8 @@ func (p *simpleProcessor) flushLoop() {
 
 func (p *simpleProcessor) flush() {
 	p.mu.Lock()
-	if p.checkpointFile != "" {
-		p.saveStateLocked()
-	}
+	// Update checkpoint
+	p.saveStateLocked(context.Background())
 
 	if len(p.aggregations) == 0 {
 		p.mu.Unlock()

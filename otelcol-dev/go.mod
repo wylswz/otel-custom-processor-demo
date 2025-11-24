@@ -219,4 +219,4 @@ require (
 	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397 // indirect
 )
 
-replace github.com/myuser/simpleprocessor v0.0.1 => /Users/wy/Desktop/workspace/otel-research/myprocessor
+replace github.com/myuser/simpleprocessor v0.0.1 => ../myprocessor

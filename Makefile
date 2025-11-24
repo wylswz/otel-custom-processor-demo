@@ -10,3 +10,7 @@ run-client:
 .PHONY: docker
 docker:
 	cd docker && docker-compose up
+
+.PHONY: install-ocb
+install-ocb:
+	curl --proto '=https' --tlsv1.2 -fL -o ocb https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv0.140.0/ocb_0.140.0_darwin_arm64 && chmod +x ocb

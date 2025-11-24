@@ -5,14 +5,13 @@ services:
     ports:
       - "6379:6379"
 
-  # comment this to simulate collector crash
-  # otel-collector:
-  #   image: otel/opentelemetry-collector:latest
-  #   command: ["--config=/etc/otel-collector-config.yaml"]
-  #   volumes:
-  #     - ./collector-config.yaml:/etc/otel-collector-config.yaml
-  #   ports:
-  #     - "5317:4317"
-  #     - "5318:4318"
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "5317:4317"
+      - "5318:4318"
 
 

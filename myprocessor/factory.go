@@ -27,7 +27,8 @@ func createDefaultConfig() component.Config {
 
 // Config represents the configuration for the simple processor.
 type Config struct {
-	CheckpointFile string `mapstructure:"checkpoint_file"`
+	CheckpointFile string        `mapstructure:"checkpoint_file"`
+	StorageID      *component.ID `mapstructure:"storage"`
 }
 
 func createMetricsProcessor(
@@ -37,5 +38,5 @@ func createMetricsProcessor(
 	nextConsumer consumer.Metrics,
 ) (processor.Metrics, error) {
 	config := cfg.(*Config)
-	return newProcessor(set.Logger, nextConsumer, config.CheckpointFile), nil
+	return newProcessor(set.Logger, nextConsumer, config.CheckpointFile, config.StorageID, set.ID), nil
 }
