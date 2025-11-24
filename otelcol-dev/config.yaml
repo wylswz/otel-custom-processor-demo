@@ -10,13 +10,31 @@ processors:
   simple:
     checkpoint_file: "my_checkpoint.json"
 
+extensions:
+  redis_storage:
+  redis_storage/all_settings:
+    endpoint: localhost:6379
+    password: ""
+    db: 0
+    expiration: 5m
+    prefix: test_
+    tls:
+      insecure: true
 exporters:
   debug:
     verbosity: detailed
+  otlp:
+    endpoint: "127.0.0.1:5317"
+    tls:
+      insecure: true
+    sending_queue:
+      storage: redis_storage/all_settings
+
 
 service:
+  extensions: [redis_storage/all_settings]
   pipelines:
     metrics:
       receivers: [otlp]
-      processors: [simple]
-      exporters: [debug]
+      processors: []
+      exporters: [debug, otlp]
