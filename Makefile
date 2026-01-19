@@ -2,7 +2,7 @@ collector:
 	cd otelcol-dev && go build -o ./build/otelcol-dev
 
 run-collector: collector
-	cd otelcol-dev && ./build/otelcol-dev --config config.yaml
+	cd otelcol-dev && ./build/otelcol-dev --config jsonnet://config.jsonnet
 
 run-client:
 	cd client-app && uv run main.py

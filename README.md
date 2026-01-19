@@ -64,3 +64,9 @@ The client sends a batch of metrics to the collector.
 ## Custom Processor Implementation
 
 The custom processor is located in `myprocessor/`. It implements the `processor.Metrics` interface and simply logs metrics and potentially mutate values.
+
+## Custom config provider
+
+Custom config provider is useful to integrate otel collector into custom systems where configurations are managed by databases or 3rd party config managers.
+
+In this example, we implemented a jsonnet config provider, see `jsonnet-provider`

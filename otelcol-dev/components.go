@@ -14,6 +14,7 @@ import (
 	debugexporter "go.opentelemetry.io/collector/exporter/debugexporter"
 	otlpexporter "go.opentelemetry.io/collector/exporter/otlpexporter"
 	prometheusremotewriteexporter "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter"
+	prometheusexporter "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter"
 	redisstorageextension "github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/redisstorageextension"
 	batchprocessor "go.opentelemetry.io/collector/processor/batchprocessor"
 	simpleprocessor "github.com/myuser/simpleprocessor"
@@ -48,6 +49,7 @@ func components() (otelcol.Factories, error) {
 		debugexporter.NewFactory(),
 		otlpexporter.NewFactory(),
 		prometheusremotewriteexporter.NewFactory(),
+		prometheusexporter.NewFactory(),
 	)
 	if err != nil {
 		return otelcol.Factories{}, err
@@ -56,6 +58,7 @@ func components() (otelcol.Factories, error) {
 	factories.ExporterModules[debugexporter.NewFactory().Type()] = "go.opentelemetry.io/collector/exporter/debugexporter v0.140.0"
 	factories.ExporterModules[otlpexporter.NewFactory().Type()] = "go.opentelemetry.io/collector/exporter/otlpexporter v0.140.0"
 	factories.ExporterModules[prometheusremotewriteexporter.NewFactory().Type()] = "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter v0.140.0"
+	factories.ExporterModules[prometheusexporter.NewFactory().Type()] = "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter v0.140.0"
 
 	factories.Processors, err = otelcol.MakeFactoryMap[processor.Factory](
 		batchprocessor.NewFactory(),

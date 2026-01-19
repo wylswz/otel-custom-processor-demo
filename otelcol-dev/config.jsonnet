@@ -1,0 +1,59 @@
+{
+  "receivers": {
+    "otlp": {
+      "protocols": {
+        "grpc": {
+          "endpoint": "0.0.0.0:4317"
+        },
+        "http": {
+          "endpoint": "0.0.0.0:4318"
+        }
+      }
+    }
+  },
+  "processors": {
+    "simple": {
+      "checkpoint_file": "my_checkpoint.json",
+      "storage": "redis_storage/all_settings"
+    }
+  },
+  "extensions": {
+    "redis_storage/all_settings": {
+      "endpoint": "localhost:6379",
+      "password": "",
+      "db": 0,
+      "expiration": "5m",
+      "prefix": "test_",
+      "tls": {
+        "insecure": true
+      }
+    }
+  },
+  "exporters": {
+    "debug": {
+      "verbosity": "detailed"
+    },
+    "prometheus": {
+      "endpoint": "0.0.0.0:9464"
+    }
+  },
+  "service": {
+    "extensions": [
+      "redis_storage/all_settings"
+    ],
+    "pipelines": {
+      "metrics": {
+        "receivers": [
+          "otlp"
+        ],
+        "processors": [
+          "simple"
+        ],
+        "exporters": [
+          "debug",
+          "prometheus"
+        ]
+      }
+    }
+  }
+}

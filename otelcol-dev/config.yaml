@@ -23,12 +23,8 @@ extensions:
 exporters:
   debug:
     verbosity: detailed
-  otlp:
-    endpoint: "127.0.0.1:5317"
-    tls:
-      insecure: true
-    sending_queue:
-      storage: redis_storage/all_settings
+  prometheus:
+    endpoint: 0.0.0.0:9464
 
 
 service:
@@ -37,4 +33,4 @@ service:
     metrics:
       receivers: [otlp]
       processors: [simple]
-      exporters: [debug, otlp]
+      exporters: [debug, prometheus]

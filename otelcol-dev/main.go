@@ -13,6 +13,7 @@ import (
 	httpprovider "go.opentelemetry.io/collector/confmap/provider/httpprovider"
 	httpsprovider "go.opentelemetry.io/collector/confmap/provider/httpsprovider"
 	yamlprovider "go.opentelemetry.io/collector/confmap/provider/yamlprovider"
+	jsonnet "github.com/myuser/provider/jsonnet"
 	"go.opentelemetry.io/collector/otelcol"
 )
 
@@ -34,6 +35,7 @@ func main() {
 					httpprovider.NewFactory(),
 					httpsprovider.NewFactory(),
 					yamlprovider.NewFactory(),
+					jsonnet.NewFactory(),
 				},
 			},
 		},
@@ -43,6 +45,7 @@ func main() {
 			httpprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/httpprovider v1.18.0",
 			httpsprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/httpsprovider v1.18.0",
 			yamlprovider.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "go.opentelemetry.io/collector/confmap/provider/yamlprovider v1.18.0",
+			jsonnet.NewFactory().Create(confmap.ProviderSettings{}).Scheme(): "github.com/myuser/provider/jsonnet v0.0.1",
     	},
 		ConverterModules: []string{
 		},

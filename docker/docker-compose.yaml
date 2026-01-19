@@ -5,13 +5,19 @@ services:
     ports:
       - "6379:6379"
 
-  otel-collector:
-    image: otel/opentelemetry-collector:latest
-    command: ["--config=/etc/otel-collector-config.yaml"]
-    volumes:
-      - ./collector-config.yaml:/etc/otel-collector-config.yaml
+  grafana:
+    image: grafana/grafana:latest
     ports:
-      - "5317:4317"
-      - "5318:4318"
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - grafana-data:/var/lib/grafana
 
+volumes:
+  grafana-data:
 
