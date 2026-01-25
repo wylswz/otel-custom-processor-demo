@@ -79,9 +79,11 @@ receivers:
 
 extensions:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/redisstorageextension v0.140.1
+  - gomod: github.com/wylswz/mymiddleware v0.0.1
+    path: ./mymiddleware
 ```
 
-注意 processor 那部分：我们的自定义 processor 通过 `path` 字段指向本地目录，这样 ocb 在构建时会引用本地代码而不是从远程拉取。
+注意 processor 和 extension 那部分：我们的自定义组件通过 `path` 字段指向本地目录，这样 ocb 在构建时会引用本地代码而不是从远程拉取。
 
 运行 `./ocb --config builder-config.yaml`，它会在 `otelcol-dev/` 目录下生成完整的 Go 代码和可执行文件。
 
@@ -151,9 +153,23 @@ Python SDK 的 `PeriodicExportingMetricReader` 就是这个模式的体现——
 
 这是最棘手的情况，因为 Collector 是有状态的——我们的 processor 在内存里维护着聚合数据。
 
-如果用的是 Cumulative 语义，Collector 重启后计数器会从 0 开始。下游 Prometheus 看到的数据会突然「跳回」一个小值，基于 `rate()` 的告警规则会产生错误的 spike。
+如果用的是 Cumulative 语义（累计值），Collector 重启后内存中的计数器丢失。如果从 0 开始重新计数，下游 Prometheus 看到的数据会突然「跳回」一个小值（Counter Reset）。虽然 Prometheus 的 `rate()` 函数能处理 Counter Reset，但会导致聚合后的「总计值」曲线出现断崖式下跌，这对于关注绝对值的看板（比如「今日总处理量」）是不可接受的。
 
-解决方案是状态持久化。我们支持两种方式：
+解决方案是**状态持久化**。我们需要在本地文件或 Redis 中保存当前的聚合值。
+
+但这里有一个很容易被忽略的细节：**Start Timestamp（起始时间戳）**。
+
+在 OTel 的数据模型中，一个 Cumulative Metric Point 包含 `start_time_unix_nano`（计数开始时间）和 `time_unix_nano`（当前采样时间）。
+- 如果我们只持久化了 Value（比如 1000），重启后 `start_time` 变成了「当前启动时间」。
+- 下游后端会收到一个数据点：`Value=1000, StartTime=Now, Time=Now`。
+- 这在语义上意味着「从启动的一瞬间到现在，已经累加了 1000」。这会被解释为无穷大的速率（Infinite Rate）！
+
+因此，正确的持久化策略是：**同时保存 Value 和它对应的 Start Timestamp**。
+1. **启动时**：尝试加载 (Value, StartTime)。
+2. **如果加载成功**：恢复内存状态，继续累加，并保持原始的 StartTime 不变。
+3. **如果无状态**：Value = 0，StartTime = Now。
+
+我们支持两种持久化方式：
 
 本地文件最简单，适合单节点部署。Redis Storage Extension 更适合生产环境，OTel Contrib 提供了 `redisstorageextension`，processor 通过 storage API 读写数据。
 
@@ -199,16 +215,6 @@ exporters:
 
 这样即使下游暂时不可用，数据也会在本地排队，等下游恢复后继续发送。
 
-## 性能考量
-
-在高吞吐场景下，几个地方需要注意。
-
-锁的粒度是个问题。我们用了一把大锁保护整个 `aggregations` map，这在写入频率极高时可能成为瓶颈。一个优化方向是分片——按 work.type 的 hash 值分成多个子 map，各自持有独立的锁。
-
-Flush 频率需要权衡。Flush 太频繁，下游压力大；Flush 太稀疏，数据延迟高。5 秒是个折中值，实际要根据业务 SLA 调整。
-
-内存占用也要关注。如果 work.type 的基数很高，aggregations map 会持续膨胀。可能需要加个上限，或者定期清理过期的 key。
-
 ## 自定义配置源
 在实际生产中，我们可能已经有现成的配置管理系统，例如 `etcd` 或者 `spring-cloud`，因此如果能把 otel 也接入到这些系统，就会非常方便。ocb 支持在 builder 中定义 provider 模块，而我们只需要实现里面的 `Provider` 接口。其本质就是从一个 uri 读取数据，解析成配置结构体。
 
@@ -218,6 +224,95 @@ Retrieve(ctx context.Context, uri string, watcher WatcherFunc)
 
 除此之外，`watcher` 参数也让我们能够实现配置的热更新。
 
+## 进阶：使用 Extension 实现熔断器 (Circuit Breaker)
+
+除了 Processor 和 Exporter，**Extension** 是 Collector 中另一个非常强大的扩展点。它通常用于提供跨组件的共享能力（如 Authentication, Storage, Service Discovery），或者像我们这里要介绍的——**Middleware**。
+
+在微服务架构中，熔断器（Circuit Breaker）是保护下游服务的重要机制。当检测到下游持续失败时，熔断器会暂时切断请求，避免雪崩效应。我们完全可以把这个逻辑封装成一个 Extension，注入到 Exporter 的 HTTP/gRPC 客户端中。
+
+### Extension 机制
+
+Extension 的生命周期由 Collector 管理（Start/Shutdown），并且可以通过 `component.Host` 被其他组件访问。更妙的是，OTel 定义了 `extensionmiddleware` 接口，允许 Extension 拦截和增强 HTTP/gRPC 请求：
+
+```go
+type HTTPClient interface {
+    GetHTTPRoundTripper(base http.RoundTripper) (http.RoundTripper, error)
+}
+
+type GRPCClient interface {
+    GetGRPCClientOptions() ([]grpc.DialOption, error)
+}
+```
+
+### 实现代码
+
+我们使用 `sony/gobreaker` 库来实现核心逻辑。首先定义 Extension 结构体：
+
+```go
+type ext struct {
+    cb *gobreaker.CircuitBreaker[any]
+}
+
+// 包装 HTTP RoundTripper
+type circuitBreakerRoundTripper struct {
+    rt  http.RoundTripper
+    cb  *gobreaker.CircuitBreaker[any]
+}
+
+func (c *circuitBreakerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+    // 使用 CircuitBreaker 执行请求
+    result, err := c.cb.Execute(func() (any, error) {
+        resp, err := c.rt.RoundTrip(req)
+        if err != nil { return nil, err }
+        if resp.StatusCode >= 500 {
+            return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+        }
+        return resp, nil
+    })
+    // ... 处理熔断错误
+}
+```
+
+然后实现 `extensionmiddleware` 接口，把这个 RoundTripper 注入进去：
+
+```go
+func (e *ext) GetHTTPRoundTripper(base http.RoundTripper) (http.RoundTripper, error) {
+    return &circuitBreakerRoundTripper{
+        rt: base,
+        cb: e.cb,
+    }, nil
+}
+```
+
+### 配置与使用
+
+在 `config.yaml` 中，我们定义这个 extension 并配置熔断规则：
+
+```yaml
+extensions:
+  resilient:
+    max_requests: 1    # 半开状态允许的请求数
+    interval: 10s      # 计数周期
+    timeout: 30s       # 熔断后等待多久尝试恢复
+
+exporters:
+  otlp/failing:
+    endpoint: localhost:9999
+    tls:
+      insecure: true
+    # 注意：具体的配置字段取决于 Exporter 的实现版本。
+    # 较新的 Collector 版本可能支持 middleware 字段，
+    # 或者通过 auth 字段引用实现了 ClientAuthenticator 的扩展。
+    auth: resilient 
+
+service:
+  extensions: [resilient] # 启用扩展
+  pipelines:
+    metrics:
+      exporters: [otlp/failing]
+```
+
+这样，当我们将此 Extension 应用于 Exporter 时，所有发出的请求都会受到熔断器的保护。这比在每个 Exporter 里重复实现熔断逻辑要优雅得多。
 
 ## Push vs Pull：Exporter 的选择
 

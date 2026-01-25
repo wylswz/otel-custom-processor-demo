@@ -20,17 +20,25 @@ extensions:
     prefix: test_
     tls:
       insecure: true
+  resilient:
+    max_requests: 1
+    interval: 10s
+    timeout: 30s
 exporters:
   debug:
     verbosity: detailed
   prometheus:
     endpoint: 0.0.0.0:9464
+  otlp/failing:
+    endpoint: localhost:9999
+    tls:
+      insecure: true
 
 
 service:
-  extensions: [redis_storage/all_settings]
+  extensions: [redis_storage/all_settings, resilient]
   pipelines:
     metrics:
       receivers: [otlp]
       processors: [simple]
-      exporters: [debug, prometheus]
+      exporters: [debug, prometheus, otlp/failing]

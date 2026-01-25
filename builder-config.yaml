@@ -23,6 +23,8 @@ receivers:
 
 extensions:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/redisstorageextension v0.140.1
+  - gomod: github.com/wylswz/mymiddleware v0.0.1
+    path: ./mymiddleware
 
 providers:
   - gomod: go.opentelemetry.io/collector/confmap/provider/envprovider v1.18.0
