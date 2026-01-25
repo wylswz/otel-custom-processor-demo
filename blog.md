@@ -1,12 +1,13 @@
 # 从零开始：构建一个自定义的 OpenTelemetry Collector 和 Processor
 
-最近在做企业级数据看板需求时，遇到了一个有意思的问题：如何在 metrics 数据流经 OpenTelemetry Collector 时做聚合处理，并且保证进程重启后状态不丢失？这促使我深入研究了 OTel Collector 的扩展机制。这篇文章记录了整个实践过程。
+最近在做 LLMOPS 可观测性时，遇到了一个有意思的问题：如果我需要自己做一个 Collector，怎么做到容错？
 
 ## 背景与需求
 
 我们的业务场景是这样的：上游有大量应用不断产生细粒度的 metrics，比如每次 API 调用都会带一个唯一的 `work.id`。这些数据直接推送到时序数据库会产生高基数问题（high cardinality），既浪费存储也影响查询性能。
 
 我们希望在 Collector 这一层做预聚合——按 `work.type` 维度汇总，丢弃高基数的 `work.id`，每隔固定时间向下游输出聚合后的结果。这个需求用现成的 processor 都不太好实现，所以决定自己写一个。
+
 
 ## 系统架构总览
 
@@ -48,9 +49,9 @@
 └────────────────────────┼────────────────────────┘
                          │ Pull (:9464) 或 Push (Remote Write)
                          ▼
-          ┌─────────────────────────────┐
-          │   Prometheus / Grafana      │
-          └─────────────────────────────┘
+          ┌──────────────────────────────────┐
+          │   Prometheus / Grafana / OTLP    │
+          └──────────────────────────────────┘
 ```
 
 这里有几个关键的设计决策。Receiver 选用 OTLP 协议，因为它是 OTel 的原生格式，SDK 都原生支持。Exporter 这边比较有意思，我同时配了 Prometheus exporter，后面会详细聊 push 和 pull 的选择问题。
@@ -216,13 +217,42 @@ exporters:
 这样即使下游暂时不可用，数据也会在本地排队，等下游恢复后继续发送。
 
 ## 自定义配置源
+
 在实际生产中，我们可能已经有现成的配置管理系统，例如 `etcd` 或者 `spring-cloud`，因此如果能把 otel 也接入到这些系统，就会非常方便。ocb 支持在 builder 中定义 provider 模块，而我们只需要实现里面的 `Provider` 接口。其本质就是从一个 uri 读取数据，解析成配置结构体。
 
 ```go
 Retrieve(ctx context.Context, uri string, watcher WatcherFunc)
 ```
 
-除此之外，`watcher` 参数也让我们能够实现配置的热更新。
+### Scheme 的作用
+
+`Retrieve` 方法的 `uri` 参数通常包含一个 scheme 前缀（如 `file:`, `env:`, `http:`）。Collector 的 `confmap` 库会根据这个 scheme 来路由到正确的 Provider 实现。
+
+例如，如果我们注册了一个 scheme 为 `jsonnet` 的 Provider，那么当我们在启动命令中使用 `--config "jsonnet:./config.jsonnet"` 时，Collector 就会调用我们的 Provider 来加载配置。
+
+### Jsonnet 示例
+
+假设我们想用 Jsonnet 来生成配置，以便复用变量和逻辑。我们可以实现一个简单的 `jsonnet` Provider：
+
+```go
+// Retrieve implements confmap.Provider
+func (p *provider) Retrieve(ctx context.Context, uri string, watcher confmap.WatcherFunc) (*confmap.Retrieved, error) {
+    // 1. 去掉 "jsonnet:" 前缀，获取文件路径
+    path := strings.TrimPrefix(uri, "jsonnet:")
+    
+    // 2. 使用 go-jsonnet 库解析文件
+    vm := jsonnet.MakeVM()
+    jsonStr, err := vm.EvaluateFile(path)
+    if err != nil {
+        return nil, err
+    }
+
+    // 3. 返回解析后的 JSON 内容（Collector 会自动将其转为 map）
+    return confmap.NewRetrievedFromYAML([]byte(jsonStr)), nil
+}
+```
+
+除此之外，`watcher` 参数也让我们能够实现配置的热更新。如果 Provider 监控到后端配置发生变化，可以调用 `watcher` 通知 Collector 重新加载。
 
 ## 进阶：使用 Extension 实现熔断器 (Circuit Breaker)
 
