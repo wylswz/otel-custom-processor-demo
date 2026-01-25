@@ -134,23 +134,15 @@ func (p *simpleProcessor) flushLoop() {
 
 ## 容错性设计
 
-一条 metrics 数据从产生到落盘，中间经过三个节点：客户端应用、Collector、下游存储。任何一个环节都可能出问题，我们需要分别考虑应对策略。
+Processor 的核心逻辑实现后，我们需要考虑生产环境中的容错问题。一条 metrics 数据从产生到落盘，中间经过三个节点：客户端应用、Collector、下游存储。任何一个环节都可能出问题，我们需要分别考虑应对策略。
 
-**上游挂了（客户端应用崩溃或网络抖动）**
+### 上游挂了（客户端应用崩溃或网络抖动）
 
 这其实是最「无害」的情况。OTel SDK 内置了 retry 机制，临时的网络问题会自动重试。如果客户端进程直接挂了，那段时间的 metrics 确实会丢失，但这通常是可接受的——毕竟进程都挂了，没有 metrics 也合理。
 
-更值得关注的是客户端发送过快导致 Collector 处理不过来的情况。这就引出了客户端队列的设计。
+OTel SDK 的 exporter 架构本身就是基于队列的，业务代码调用 `counter.add()` 时数据不会立即发送，而是先进入内存队列，由后台线程批量导出。这个设计既保证了业务线程不被网络 IO 阻塞，也通过批量发送提高了吞吐。如果对数据完整性要求很高，可以考虑持久化队列（如 SQLite、RocksDB），但通常内存队列就足够了。
 
-OTel SDK 的 exporter 架构本身就是基于队列的。业务代码调用 `counter.add()` 时，数据并不会立即发送，而是先进入一个内存队列，由后台线程批量导出。这个设计同时解决了两个问题：性能上，业务线程不会被网络 IO 阻塞，发送操作是完全异步的；吞吐上，小数据攒成大批次发送，减少网络往返。
-
-Python SDK 的 `PeriodicExportingMetricReader` 就是这个模式的体现——它每隔固定间隔（比如 5 秒）把累积的 metrics 批量推给 exporter。
-
-但内存队列有个问题：进程崩溃时队列里的数据就丢了。如果你的业务对数据完整性要求很高，可以考虑持久化队列。思路是在数据进入队列时先写一份到本地磁盘（SQLite、RocksDB 或者简单的 append-only 文件都行），发送成功后再删除。这样即使进程意外退出，重启后也能从磁盘恢复未发送的数据。
-
-当然，持久化队列会带来额外的写盘开销。实际中需要权衡：对于 metrics 这种高频、可容忍少量丢失的数据，内存队列通常就够了；但如果是计费相关的 metrics，或者审计日志，持久化就很有必要。
-
-**Collector 挂了（进程崩溃或重启）**
+### Collector 挂了（进程崩溃或重启）
 
 这是最棘手的情况，因为 Collector 是有状态的——我们的 processor 在内存里维护着聚合数据。
 
@@ -191,7 +183,7 @@ func (p *simpleProcessor) Shutdown(ctx context.Context) error {
 
 用 Redis 还有个好处：如果你跑多个 Collector 副本做高可用，它们可以共享状态。当然，这时候需要小心并发问题，简单的 map 操作可能需要换成 Redis 的原子操作。
 
-**下游挂了（Prometheus 或存储后端不可用）**
+### 下游挂了（Prometheus 或存储后端不可用）
 
 这个问题在 push 和 pull 模式下表现不同。
 
@@ -216,7 +208,58 @@ exporters:
 
 这样即使下游暂时不可用，数据也会在本地排队，等下游恢复后继续发送。
 
-## 自定义配置源
+## Push vs Pull：Exporter 的选择
+
+在容错性设计中，我们已经看到了 push 和 pull 模式在应对下游故障时的不同表现。现在让我们更详细地聊聊这两种模式的特点和适用场景。
+
+### Push 模式（OTLP Exporter / Prometheus Remote Write）
+
+Collector 主动把数据推到远端。好处是延迟可控，配置简单，不需要暴露额外端口。坏处是对接收端有压力，如果推送速度超过了处理速度，要么丢数据要么本地排队。
+
+Remote Write 是 Prometheus 生态里常用的 push 方式，协议基于 Protobuf，效率不错。适合往 Cortex、Thanos、VictoriaMetrics 这类分布式时序库写数据。
+
+### Pull 模式（Prometheus Exporter）
+
+Collector 暴露一个 HTTP 端点（比如 `:9464/metrics`），等 Prometheus server 来抓。这是 Prometheus 的「正统」玩法，好处是天然有背压——抓取方控制频率，不会压垮被抓取方。坏处是需要服务发现机制让 Prometheus 知道去哪抓，在动态环境（比如 K8s Pod 扩缩容）下稍麻烦一些。
+
+我们的配置里同时开了两种：
+
+```yaml
+exporters:
+  debug:
+    verbosity: detailed
+  prometheus:
+    endpoint: 0.0.0.0:9464
+
+service:
+  pipelines:
+    metrics:
+      exporters: [debug, prometheus]
+```
+
+开发阶段用 debug exporter 看原始数据；生产环境用 prometheus exporter 让监控系统来抓。如果你的基础设施更偏向 push（比如用的是 Datadog 或 New Relic），换成对应的 exporter 就行。
+
+## 实际跑起来
+
+启动顺序是：先起 Redis（如果用了 storage extension），再起 Collector，最后跑客户端发数据。
+
+```bash
+# 终端 1：起 Redis
+cd docker && docker-compose up
+
+# 终端 2：编译并运行 Collector
+cd otelcol-dev && go build -o ./build/otelcol-dev
+./build/otelcol-dev --config config.yaml
+
+# 终端 3：发送测试数据
+cd client-app && uv run main.py
+```
+
+Python 客户端会发送 100 条 metrics，每条带有 `work.type=manual` 和唯一的 `work.id`。经过我们的 processor 聚合后，你在 Prometheus（或 debug 输出）里只会看到一条 `work_done_batched{work.type="manual"}` 计数器，值是累加后的总数。
+
+## 进阶话题
+
+### 自定义配置源
 
 在实际生产中，我们可能已经有现成的配置管理系统，例如 `etcd` 或者 `spring-cloud`，因此如果能把 otel 也接入到这些系统，就会非常方便。ocb 支持在 builder 中定义 provider 模块，而我们只需要实现里面的 `Provider` 接口。其本质就是从一个 uri 读取数据，解析成配置结构体。
 
@@ -224,13 +267,9 @@ exporters:
 Retrieve(ctx context.Context, uri string, watcher WatcherFunc)
 ```
 
-### Scheme 的作用
-
 `Retrieve` 方法的 `uri` 参数通常包含一个 scheme 前缀（如 `file:`, `env:`, `http:`）。Collector 的 `confmap` 库会根据这个 scheme 来路由到正确的 Provider 实现。
 
 例如，如果我们注册了一个 scheme 为 `jsonnet` 的 Provider，那么当我们在启动命令中使用 `--config "jsonnet:./config.jsonnet"` 时，Collector 就会调用我们的 Provider 来加载配置。
-
-### Jsonnet 示例
 
 假设我们想用 Jsonnet 来生成配置，以便复用变量和逻辑。我们可以实现一个简单的 `jsonnet` Provider：
 
@@ -254,13 +293,11 @@ func (p *provider) Retrieve(ctx context.Context, uri string, watcher confmap.Wat
 
 除此之外，`watcher` 参数也让我们能够实现配置的热更新。如果 Provider 监控到后端配置发生变化，可以调用 `watcher` 通知 Collector 重新加载。
 
-## 进阶：使用 Extension 实现熔断器 (Circuit Breaker)
+### 使用 Extension 实现熔断器 (Circuit Breaker)
 
 除了 Processor 和 Exporter，**Extension** 是 Collector 中另一个非常强大的扩展点。它通常用于提供跨组件的共享能力（如 Authentication, Storage, Service Discovery），或者像我们这里要介绍的——**Middleware**。
 
 在微服务架构中，熔断器（Circuit Breaker）是保护下游服务的重要机制。当检测到下游持续失败时，熔断器会暂时切断请求，避免雪崩效应。我们完全可以把这个逻辑封装成一个 Extension，注入到 Exporter 的 HTTP/gRPC 客户端中。
-
-### Extension 机制
 
 Extension 的生命周期由 Collector 管理（Start/Shutdown），并且可以通过 `component.Host` 被其他组件访问。更妙的是，OTel 定义了 `extensionmiddleware` 接口，允许 Extension 拦截和增强 HTTP/gRPC 请求：
 
@@ -273,8 +310,6 @@ type GRPCClient interface {
     GetGRPCClientOptions() ([]grpc.DialOption, error)
 }
 ```
-
-### 实现代码
 
 我们使用 `sony/gobreaker` 库来实现核心逻辑。首先定义 Extension 结构体：
 
@@ -314,8 +349,6 @@ func (e *ext) GetHTTPRoundTripper(base http.RoundTripper) (http.RoundTripper, er
 }
 ```
 
-### 配置与使用
-
 在 `config.yaml` 中，我们定义这个 extension 并配置熔断规则：
 
 ```yaml
@@ -343,55 +376,6 @@ service:
 ```
 
 这样，当我们将此 Extension 应用于 Exporter 时，所有发出的请求都会受到熔断器的保护。这比在每个 Exporter 里重复实现熔断逻辑要优雅得多。
-
-## Push vs Pull：Exporter 的选择
-
-最后聊聊 metrics 输出的两种模式。
-
-**Push 模式（OTLP Exporter / Prometheus Remote Write）**
-
-Collector 主动把数据推到远端。好处是延迟可控，配置简单，不需要暴露额外端口。坏处是对接收端有压力，如果推送速度超过了处理速度，要么丢数据要么本地排队。
-
-Remote Write 是 Prometheus 生态里常用的 push 方式，协议基于 Protobuf，效率不错。适合往 Cortex、Thanos、VictoriaMetrics 这类分布式时序库写数据。
-
-**Pull 模式（Prometheus Exporter）**
-
-Collector 暴露一个 HTTP 端点（比如 `:9464/metrics`），等 Prometheus server 来抓。这是 Prometheus 的「正统」玩法，好处是天然有背压——抓取方控制频率，不会压垮被抓取方。坏处是需要服务发现机制让 Prometheus 知道去哪抓，在动态环境（比如 K8s Pod 扩缩容）下稍麻烦一些。
-
-我们的配置里同时开了两种：
-
-```yaml
-exporters:
-  debug:
-    verbosity: detailed
-  prometheus:
-    endpoint: 0.0.0.0:9464
-
-service:
-  pipelines:
-    metrics:
-      exporters: [debug, prometheus]
-```
-
-开发阶段用 debug exporter 看原始数据；生产环境用 prometheus exporter 让监控系统来抓。如果你的基础设施更偏向 push（比如用的是 Datadog 或 New Relic），换成对应的 exporter 就行。
-
-## 实际跑起来
-
-启动顺序是：先起 Redis（如果用了 storage extension），再起 Collector，最后跑客户端发数据。
-
-```bash
-# 终端 1：起 Redis
-cd docker && docker-compose up
-
-# 终端 2：编译并运行 Collector
-cd otelcol-dev && go build -o ./build/otelcol-dev
-./build/otelcol-dev --config config.yaml
-
-# 终端 3：发送测试数据
-cd client-app && uv run main.py
-```
-
-Python 客户端会发送 100 条 metrics，每条带有 `work.type=manual` 和唯一的 `work.id`。经过我们的 processor 聚合后，你在 Prometheus（或 debug 输出）里只会看到一条 `work_done_batched{work.type="manual"}` 计数器，值是累加后的总数。
 
 ## 小结
 
